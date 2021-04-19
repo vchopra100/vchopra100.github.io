@@ -1,0 +1,460 @@
+;****************** main.s ***************
+; Program writCycle10 by: ***Vedant Chopra***
+; Date Created: 2/4/2017
+; Last Modified: 8/24/2018
+; Brief description of the program
+;   The LED toggles at 2 Hz and a varying duty-cycle
+; Hardware connections (External: One button and one LED)
+;  PE2 is Button input  (1 means pressed, 0 means not pressed)
+;  PE3 is LED output (1 activates external LED on protoboard)
+;  PF4 is builtin button SW1 on Launchpad (Internal) 
+;        Negative Logic (0 means pressed, 1 means not pressed)
+; Overall functionality of this system is to operate like this
+;   1) Make PE3 an output and make PE2 and PF4 inputs.
+;   2) The system starts with the the LED toggling at 2Hz,
+;      which is 2 times per second with a duty-cycle of 30%.
+;      Therefore, the LED is ON for 150ms and off for 350 ms.
+;   3) When the button (PE1) is pressed-and-released decrease
+;      the duty cycle by 20% (modulo 100%). Therefore for each
+;      press-and-release the duty cycle changes from 90% to 70% to 50%
+;      to 30% to 10% to 90% so on...
+;   4) Implement a "breathing LED" when SW1 (PF4) on the Launchpad is pressed
+;      
+;      TIP: debug the breathing LED algorithm using the real board.
+
+;PortE device registers
+GPIO_PORTE_DATA_R  EQU 	0x400243FC; to read all bits on port E
+GPIO_PORTE_DIR_R   EQU 	0x40024400; GPIO direction register (GPIODIR)
+GPIO_PORTE_AFSEL_R EQU 	0x40024420; GPIO alternative function select (GPIOAFSEL)
+GPIO_PORTE_PDR_R   EQU 	0x40024514; GPIO pull-down resistor register (GPIOPDR)
+GPIO_PORTE_DEN_R   EQU 	0x4002451C; GPIO digital enable (GPIODEN)
+GPIO_PORTE_LOCK_R  EQU 	0x40024520; GPIO lock register (GPIOLOCK)
+GPIO_PORTE_CR_R	   EQU 	0x40024524; GPIO commit register (GPIOCR)
+GPIO_PORTE_AMSEL_R EQU 	0x40024528; GPIO analog mode select (GPIOAMSEL)
+GPIO_PORTE_PCTL_R  EQU 	0x4002452C; GPIO port control (GPIOPCTL)
+	
+;PortF device registers
+GPIO_PORTF_DATA_R  EQU 0x400253FC	; to read all bits on port F
+GPIO_PORTF_DIR_R   EQU 0x40025400	; GPIO direction register (GPIODIR)
+GPIO_PORTF_AFSEL_R EQU 0x40025420	; GPIO alternative function select (GPIOAFSEL)
+GPIO_PORTF_PUR_R   EQU 0x40025510	; GPIO pull-up resistor register (GPIOPUR)
+GPIO_PORTF_DEN_R   EQU 0x4002551C	; GPIO digital enable (GPIODEN)
+GPIO_PORTF_LOCK_R  EQU 0x40025520	; GPIO lock register (GPIOLOCK)
+GPIO_PORTF_CR_R    EQU 0x40025524	; GPIO commit register (GPIOCR)
+GPIO_PORTF_AMSEL_R EQU 0x40025528	; GPIO analog mode select (GPIOAMSEL)
+GPIO_PORTF_PCTL_R  EQU 0x4002552C	; GPIO port control (GPIOPCTL) 
+GPIO_LOCK_KEY      EQU 0x4C4F434B  	; Unlocks the GPIO_CR register
+SYSCTL_RCGCGPIO_R  EQU 0x400FE608
+	
+; SysTick Timer addresses
+NVIC_ST_CTRL_R 		EQU 0xE000E010	; SysTick Control and Status Register (STCTRL)
+NVIC_ST_RELOAD_R	EQU 0xE000E014	; SysTick Reload Value register (STRELOAD)
+NVIC_ST_CURRENT_R	EQU 0xE000E018	; SysTick Current Value Register (STCURRENT)
+DELAY				EQU 400000		; 400,000 ticks = 5ms at 80MHz
+
+
+       IMPORT  TExaS_Init
+       THUMB
+       AREA    DATA, ALIGN=2
+;global variables go here
+
+
+       AREA    |.text|, CODE, READONLY, ALIGN=2
+       THUMB
+       EXPORT  Start
+Start
+ ; TExaS_Init sets bus clock at 80 MHz
+     BL  TExaS_Init ; voltmeter, scope on PD3
+ ; Initialization goes here
+ 
+;******************* PORT E CONFIGURATION ********************** 
+; step 1:  activate clock for Ports E & F
+	LDR R1, =SYSCTL_RCGCGPIO_R;
+	LDR R0, [R1]
+	ORR R0, #0x30 ; set bit 4 and 5 to turn on clock for Port E
+	STR R0, [R1]
+	NOP		
+	NOP			  ;allows clock to finish
+
+; step 2: unlock the lock register for Port E
+	LDR R1, =GPIO_PORTE_LOCK_R
+	LDR R0, =0x4C4F434B 	;This key stored in LOCK_KEY will unlock PORTE_LOCK, any other value will lock PORTE_LOCK
+	STR R0, [R1]
+
+	LDR R1, =GPIO_PORTE_CR_R
+	LDR R0, [R1]
+	ORR R0, #0xFF	;need all 0-7 bits to be set to 1 to allow next steps
+	STR R0, [R1];
+
+; step 3: disable analog function for Port E --> CAN OMIT, analog function is disabled by default
+	LDR R1, =GPIO_PORTE_AMSEL_R;
+	LDR R0, [R1]
+	BIC R0, #0xFF	;need to diable, so must clear all 0-7 bits to disable
+	STR R0, [R1]
+  
+; step 4: clear bits in PCTL --> CAN OMIT, most GPIO pins are set to GPIO on reset (i.e., no alternate function)
+	LDR R1, =GPIO_PORTE_PCTL_R
+	MOV R0, #0	;allows all PORT E pins to be set at GPIO
+	LDR R0, [R1]
+ 
+; step 5: set direction register
+	LDR R1, =GPIO_PORTE_DIR_R
+	MOV R0, #0x08	;setting bits 2 as 0 (input) and bit 3 as 1 (output) this will give us 1000 in binary and 8 in hex
+	STR R0, [R1]
+	
+	LDR R1, =GPIO_PORTE_PDR_R
+	LDR R0, [R1]
+	ORR R0, #0x04	;need pull down on inputs, due to positive logic, setting 2 as hi. 0100 in binary, 4 in hex
+	STR R0, [R1]
+ 
+; step 6: clear bits in alternate function register
+	LDR R1, =GPIO_PORTE_AFSEL_R
+	LDR R0, [R1]
+	BIC R0, #0xF	;We want to clear bits 0-3 because we want GPIO to control, not external hardware
+	STR R0, [R1]
+ 
+; step 7: enable digital port
+	LDR R1, =GPIO_PORTE_DEN_R
+	LDR R0, [R1]
+	ORR R0, #0xC	; using bits 2 and 3 so must have them all set to 1. 1100 in binary and C in hex
+	STR R0, [R1]
+
+; Setting PE3 to hi, therfore turning on output LED
+	LDR R1, =GPIO_PORTE_DATA_R
+	MOV R0, #0x8
+	STR R0, [R1]
+
+;******************* PORT F CONFIGURATION **********************
+; step 1:  activate clock for Port F
+; already did when initialized Port E
+
+; step 2: unlock the lock register for Port F
+ LDR R1, =GPIO_PORTF_LOCK_R ; loads register R1 with address 0x40025520
+ LDR R0, =0x4C4F434B 		; loads the address 0x4C4F434B into R0
+ STR R0, [R1] 				; writing 0x4C4F434B to the lock register unlocks GPIO Port F Commit Register
+ LDR R1, =GPIO_PORTF_CR_R 	; loads register R1 with address 0x40025524
+ MOV R0, #0xFF  			; 1 means allow access to all 8 pins of port
+ STR R0, [R1]				; enable commit for Port F
+
+; step 3: disable analog function --> CAN OMIT, analog function is disabled by default
+ LDR R1, =GPIO_PORTF_AMSEL_R	; analog mode select register
+ LDR R0, [R1]					; load conCycle10ts of GPIOAMSEL register to R0
+ BIC R0, R0, #0xFF				; clear bottom 8 bits of the GPIOAMSEL data
+ STR R0, [R1]					; write to GPIOAMSEL register
+  
+; step 4: clear bits in PCTL --> CAN SKIP, most GPIO pins are set to GPIO on reset (i.e., no alternate function)
+ LDR R1, =GPIO_PORTF_PCTL_R	; port control register
+ MOV R0, #0					; load R0 with #0 which makes all Port F pins GPIO, MOV performs a sign exCycle10d
+ STR R0, [R1]				; write back to GPIOPCTL register
+ 
+; step 5: set direction register
+ LDR R1, =GPIO_PORTF_DIR_R ; create address pointing to direction register
+ MOV R0, #0x00 		; all pins are inputs (0)
+ STR R0, [R1]		; store value in R0
+
+ LDR R1, =GPIO_PORTF_PUR_R 	; pull-up resistor for PF4
+ LDR R0, [R1]
+ ORR R0, R0, #0x10			; different from book code which is unfriendly
+ STR R0, [R1]
+ 
+ ; step 6: clear bits in alternate function register
+ LDR R1, =GPIO_PORTF_AFSEL_R	; alternate function register address
+ LDR R0, [R1]					; load AFSEL register value into R0
+ BIC R0, R0, #0x1F				; clear bits 4-0
+ STR R0, [R1]					; write back to AFSEL register
+ 
+ ; step 7: enable digital port
+ LDR R1, =GPIO_PORTF_DEN_R	; load digital enable register address
+ LDR R0, [R1]				; load value of GPIODEN register into R0
+ ORR R0, R0, #0x10			; set bit for pin 4 to enable digital
+ STR R0, [R1]
+
+; Initialize the SysTick Timer
+	BL	SysTickInit
+
+
+
+; MAIN PROGRAM ****************************
+
+
+	CPSIE  I    		; TExaS voltmeter, scope runs on interrupts
+	
+;DELAY EQU 4000000
+
+Cycle90
+	BL TExaS_Init
+	
+	LDR R1, =GPIO_PORTE_DATA_R
+	LDR R0, [R1]
+	ANDS R0, #0x4
+	LDR R2, =9
+	
+	BNE.W wait
+	
+	;90% duty on
+	LDR R0, =DELAY
+	BL SysTick_Wait
+	BL SysTick_Wait
+	BL SysTick_Wait
+	BL SysTick_Wait
+	BL SysTick_Wait
+	BL SysTick_Wait
+	BL SysTick_Wait
+	BL SysTick_Wait
+	BL SysTick_Wait
+	
+	
+	;Toggle PE3
+	LDR R1, =GPIO_PORTE_DATA_R
+	LDR R0, [R1]
+	EOR R0, #0x8
+	STR R0, [R1]
+	
+	;10% duty off
+	LDR R0, =DELAY
+	BL SysTick_Wait
+	
+	;Toggle PE3
+	LDR R1, =GPIO_PORTE_DATA_R
+	LDR R0, [R1]
+	EOR R0, #0x8
+	STR R0, [R1]
+	
+	B Cycle90
+	
+Cycle70
+	BL TExaS_Init
+	
+	LDR R1, =GPIO_PORTE_DATA_R
+	LDR R0, [R1]
+	ANDS R0, #0x4
+	LDR R2, =7
+	
+	BNE.W wait
+	
+	;70% duty on
+	LDR R0, =DELAY
+	BL SysTick_Wait
+	BL SysTick_Wait
+	BL SysTick_Wait
+	BL SysTick_Wait
+	BL SysTick_Wait
+	BL SysTick_Wait
+	BL SysTick_Wait
+	
+	
+	;Toggle PE3
+	LDR R1, =GPIO_PORTE_DATA_R
+	LDR R0, [R1]
+	EOR R0, #0x8
+	STR R0, [R1]
+	
+	;70% duty off
+	LDR R0, =DELAY
+	BL SysTick_Wait
+	BL SysTick_Wait
+	BL SysTick_Wait
+	
+	;Toggle PE3
+	LDR R1, =GPIO_PORTE_DATA_R
+	LDR R0, [R1]
+	EOR R0, #0x8
+	STR R0, [R1]
+	
+	B Cycle70
+	
+Cycle50
+	BL TExaS_Init
+	
+	LDR R1, =GPIO_PORTE_DATA_R
+	LDR R0, [R1]
+	ANDS R0, #0x4
+	LDR R2, =5
+	
+	BNE.W wait
+	
+	;50% duty on
+	LDR R0, =DELAY
+	BL SysTick_Wait
+	BL SysTick_Wait
+	BL SysTick_Wait
+	BL SysTick_Wait
+	BL SysTick_Wait
+	
+	
+	;Toggle PE3
+	LDR R1, =GPIO_PORTE_DATA_R
+	LDR R0, [R1]
+	EOR R0, #0x8
+	STR R0, [R1]
+	
+	;50% duty off
+	LDR R0, =DELAY
+	BL SysTick_Wait
+	BL SysTick_Wait
+	BL SysTick_Wait
+	BL SysTick_Wait
+	BL SysTick_Wait
+	
+	;Toggle PE3
+	LDR R1, =GPIO_PORTE_DATA_R
+	LDR R0, [R1]
+	EOR R0, #0x8
+	STR R0, [R1]
+	
+	B Cycle50
+	
+Cycle30
+	BL TExaS_Init
+	
+	LDR R1, =GPIO_PORTE_DATA_R
+	LDR R0, [R1]
+	ANDS R0, #0x4
+	LDR R2, =3
+	
+	BNE.W wait
+	
+	;30% duty on
+	LDR R0, =DELAY
+	BL SysTick_Wait
+	BL SysTick_Wait
+	BL SysTick_Wait
+	
+	
+	;Toggle PE3
+	LDR R1, =GPIO_PORTE_DATA_R
+	LDR R0, [R1]
+	EOR R0, #0x8
+	STR R0, [R1]
+	
+	;70% duty off
+	LDR R0, =DELAY
+	BL SysTick_Wait
+	BL SysTick_Wait
+	BL SysTick_Wait
+	BL SysTick_Wait
+	BL SysTick_Wait
+	BL SysTick_Wait
+	BL SysTick_Wait
+	
+	;Toggle PE3
+	LDR R1, =GPIO_PORTE_DATA_R
+	LDR R0, [R1]
+	EOR R0, #0x8
+	STR R0, [R1]
+	
+	B Cycle30
+	
+Cycle10
+	BL TExaS_Init
+	
+	LDR R1, =GPIO_PORTE_DATA_R
+	LDR R0, [R1]
+	ANDS R0, #0x4
+	LDR R2, =1
+	
+	BNE.W wait
+	
+	;10% duty on
+	LDR R0, =DELAY
+	BL SysTick_Wait
+	
+	
+	;Toggle PE3
+	LDR R1, =GPIO_PORTE_DATA_R
+	LDR R0, [R1]
+	EOR R0, #0x8
+	STR R0, [R1]
+	
+	;90% duty off
+	LDR R0, =DELAY
+	BL SysTick_Wait
+	BL SysTick_Wait
+	BL SysTick_Wait
+	BL SysTick_Wait
+	BL SysTick_Wait
+	BL SysTick_Wait
+	BL SysTick_Wait
+	BL SysTick_Wait
+	BL SysTick_Wait
+	
+	;Toggle PE3
+	LDR R1, =GPIO_PORTE_DATA_R
+	LDR R0, [R1]
+	EOR R0, #0x8
+	STR R0, [R1]
+	
+	B Cycle10
+
+
+ChooseCycle
+	MOV R0, R2
+	SUBS R0, #9
+	BEQ  Cycle70
+	
+	MOV R0, R2
+	SUBS R0, #7
+	BEQ  Cycle50
+	
+	MOV R0, R2
+	SUBS R0, #5
+	BEQ  Cycle30
+	
+	MOV R0, R2
+	SUBS R0, #3
+	BEQ  Cycle10
+	
+	MOV R0, R2
+	SUBS R0, #1
+	BEQ  Cycle90
+	
+
+wait 
+	LDR R1, =GPIO_PORTE_DATA_R
+	LDR R0, [R1]
+	ANDS R0, #0x4
+	
+	BEQ ChooseCycle
+	
+	B wait
+
+
+SysTickInit
+; Step 1: clear the SysTick enable bit to turn off during initialization
+	LDR R1, =NVIC_ST_CTRL_R
+	MOV R0, #0
+	STR R0, [R1]
+	
+; Step 2: reload the counter start value
+	LDR R1, =NVIC_ST_RELOAD_R
+	LDR R0, =0X00FFFFFF
+	STR R0, [R1]
+
+; Step 3: write current value register to clear the counter
+	LDR R1, =NVIC_ST_CURRENT_R
+	MOV R0, #0
+	STR R0, [R1]
+
+; Step 4: write the desired clock mode (core clock) to the control register
+	LDR R1, =NVIC_ST_CTRL_R
+	MOV R0, #0x05
+	STR R0, [R1]
+	BX LR
+	
+
+SysTick_Wait
+	; load counter with desired number of ticks
+	LDR	R1,	=NVIC_ST_RELOAD_R	; R1 = &NVIC_ST_RELOAD_R
+	SUB	R0,	#1					; (delay-1) = number of ticks to wait
+	STR	R0,	[R1]
+	; get address of register that has COUNT bit
+	LDR	R1,	=NVIC_ST_CTRL_R		; R1 = & NVIC_ST_CTRL_R
+SysTick_Wait_loop
+	LDR	R3,	[R1]
+	ANDS R3, R3, #0x00010000	; COUNT bit is bit 16
+	BEQ	SysTick_Wait_loop		; if COUNT == 0, the counter has not hit zero, so keep waiting
+	BX	LR
+      
+    ALIGN      ; make sure the end of this section is aligned
+    END        ; end of file
+
