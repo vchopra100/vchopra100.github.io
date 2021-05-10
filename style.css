@@ -426,9 +426,8 @@ p {
 #activities2 .activities-header p {
   font-size: medium;
   color: black;
-  padding: 150px;
-  margin-top: -150px;
-  margin-bottom: -50px;
+  margin-top: 50px;
+  margin-bottom: 50px;
 }
 #activities2 .all-activities {
   display: flex;
